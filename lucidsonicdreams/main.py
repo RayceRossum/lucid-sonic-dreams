@@ -670,7 +670,7 @@ class LucidSonicDream:
                   duration: float = None, 
                   save_frames: bool = False,
                   batch_size: int = 1,
-                  frame_batch_size: int = None,
+                  frame_batch_size: int = 100,
                   speed_fpm: int = 12,
                   pulse_percussive: bool = True,
                   pulse_harmonic: bool = False,
