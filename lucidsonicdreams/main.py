@@ -798,25 +798,45 @@ class LucidSonicDream:
 
     # Load output audio
     if output_audio:
-      wav_output, sr_output = librosa.load(output_audio, 
-                                  offset=start, duration=duration)
+        wav_output, sr_output = librosa.load(output_audio, offset=start, duration=duration)
     else:
-      wav_output, sr_output = self.wav, self.sr
+        wav_output, sr_output = self.wav, self.sr
 
     # Write temporary movie file
     print('\nGenerating movie...\n')
-
     if np.any(all_frames): # If frames not passed back, then they're in folder
-      imageio.mimwrite('tmp.mp4', all_frames, quality=8, fps=self.sr/self.frame_duration)
-      video = mpy.VideoFileClip('tmp.mp4')
+        imageio.mimwrite('tmp.mp4', all_frames, quality=8, fps=self.sr/self.frame_duration)
+        video = mpy.VideoFileClip('tmp.mp4')
     else:
-      video = mpy.ImageSequenceClip(self.frames_dir, fps=self.sr/self.frame_duration)
+        video = mpy.ImageSequenceClip(self.frames_dir, fps=self.sr/self.frame_duration)
 
-    # Write temporary audio file
-    soundfile.write('tmp.wav', wav_output, sr_output)
+    # Write temporary audio file - fixing the soundfile write
+    temp_audio_path = 'tmp.wav'
+    try:
+        # Ensure audio data is normalized float32 between -1 and 1
+        wav_output = np.array(wav_output, dtype=np.float32)
+        if wav_output.max() > 1.0 or wav_output.min() < -1.0:
+            wav_output = wav_output / max(abs(wav_output.max()), abs(wav_output.min()))
+        
+        soundfile.write(temp_audio_path, wav_output, sr_output, format='WAV')
+    except Exception as e:
+        print(f"Error writing audio file: {e}")
+        raise
 
     # Mix audio & video
-    audio = mpy.AudioFileClip('tmp.wav', fps = self.sr*2)
+    try:
+        audio = mpy.AudioFileClip(temp_audio_path, fps=self.sr*2)
+        video = video.set_audio(audio)
+        video.write_videofile(file_name, audio_codec='aac', audio_bitrate="1024k")
+    finally:
+        # Clean up temporary files
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+        if np.any(all_frames) and os.path.exists('tmp.mp4'):
+            os.remove('tmp.mp4')
+        if not save_frames and not np.any(all_frames) and os.path.exists(self.frames_dir): 
+            shutil.rmtree(self.frames_dir)
+        del all_frames
     
     video = video.set_audio(audio)
     video.write_videofile(file_name, audio_codec='aac', audio_bitrate="1024k")
