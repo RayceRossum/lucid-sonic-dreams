@@ -855,7 +855,7 @@ class EffectsGenerator:
     
     # Now with dirty hax for rounded fps values!
     # Previous max ~40fps, this is for 60fps
-    sample_rate = 30720
+    sample_rate = 30720*2
 
     # Load spectrogram 
     wav, sr = librosa.load(self.audio, sr=sample_rate, offset=start, duration=duration)
