@@ -382,6 +382,9 @@ class LucidSonicDream:
     class_smooth_frames = self.class_smooth_seconds * fps
     motion_react = self.motion_react * 20 / fps
 
+
+    print(self.wav)
+    print(self.sr)
     # Get number of noise vectors to initialise (based on speed_fpm)
     num_init_noise = round(
       librosa.get_duration(path=self.wav, sr=self.sr)/60*self.speed_fpm)
