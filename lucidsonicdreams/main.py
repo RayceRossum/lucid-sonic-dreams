@@ -625,6 +625,9 @@ class LucidSonicDream:
                 with torch.no_grad(): # Can this be sped up? https://developer.nvidia.com/blog/accelerating-inference-up-to-6x-faster-in-pytorch-with-torch-tensorrt/
                     image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs).detach().cpu()
 
+      # TODO: Create generator function that yields results and adds them to array
+      # Such that we are continuously feeding the gpu with data 
+
         # For each image in generated batch: apply effects, resize, and save
         for j, image in enumerate(image_batch): 
             image_index = (i * batch_size) + j
