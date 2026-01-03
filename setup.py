@@ -28,9 +28,10 @@ setuptools.setup(
                       'scipy',
                       'scikit-image',
                       'pygit2',
-                      'gdown', 
+                      'gdown',
                       'mega.py',
                       'requests',
-                      'pandas',
-                      'SoundFile']
+                      'SoundFile',
+                      'imageio',
+                      'imageio-ffmpeg']
 )
