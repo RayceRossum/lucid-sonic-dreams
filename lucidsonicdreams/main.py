@@ -340,8 +340,14 @@ class LucidSonicDream:
     elif self.use_r3gan:
         # Setup R3GAN repository
         r3gan_path = setup_r3gan(stylegan_base)
-        if r3gan_path not in sys.path:
-            sys.path.insert(0, r3gan_path)
+        # Clear any cached stylegan modules that would interfere with R3GAN
+        # This is critical because R3GAN models need training.networks_baseline
+        sys.path = [p for p in sys.path if 'stylegan' not in p.lower()]
+        sys.path.insert(0, r3gan_path)
+        # Force reimport - clear cached modules from stylegan3
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith(('training', 'dnnlib', 'legacy', 'torch_utils')):
+                del sys.modules[mod_name]
         self.dnnlib = import_module("dnnlib")
         self.legacy = import_module("legacy")
         print("Using R3GAN - Modern GAN baseline (arxiv:2501.05441)")
