@@ -487,7 +487,8 @@ class LucidSonicDream:
             self.use_fp16 = False  # Disable for R3GAN
 
         # torch.compile for PyTorch 2.0+ (can provide 20-50% speedup)
-        if self.use_compile and self.device.type == 'cuda':
+        # Skip for R3GAN - it uses custom CUDA ops that don't work with torch.compile
+        if self.use_compile and self.device.type == 'cuda' and not self.use_r3gan:
             try:
                 self.Gs = torch.compile(self.Gs, mode='reduce-overhead')
                 print("Using torch.compile() for optimized inference")
