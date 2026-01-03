@@ -22,6 +22,7 @@ import pygit2
 from importlib import import_module
 
 from .helper_functions import *
+from .helper_functions import is_r3gan_style, R3GAN_MODELS
 from .sample_effects import *
 
 import imageio
@@ -86,6 +87,10 @@ def get_stylegan_base_dir():
 STYLEGAN3_REPO = 'https://github.com/NVlabs/stylegan3.git'
 STYLEGAN2_REPO = 'https://github.com/NVlabs/stylegan2-ada-pytorch.git'
 
+# R3GAN repo URL - Modern GAN baseline with better FID scores
+# Paper: https://arxiv.org/abs/2501.05441
+R3GAN_REPO = 'https://github.com/brownvc/R3GAN.git'
+
 
 def setup_stylegan(base_dir, use_stylegan3=True):
     """Setup StyleGAN repository with proper path handling.
@@ -119,6 +124,31 @@ def setup_stylegan(base_dir, use_stylegan3=True):
             print("Cloning StyleGAN2-ada-pytorch repository...")
             pygit2.clone_repository(STYLEGAN2_REPO, sg2_path)
         return sg2_path
+
+
+def setup_r3gan(base_dir):
+    """Setup R3GAN repository with proper path handling.
+
+    R3GAN is a modern GAN baseline that achieves state-of-the-art results
+    while being simpler than StyleGAN2/3. It uses a regularized relativistic
+    GAN loss (RpGAN + R1 + R2) with mathematically proven convergence.
+
+    Paper: "The GAN is dead; long live the GAN! A Modern Baseline GAN"
+    https://arxiv.org/abs/2501.05441
+
+    Args:
+        base_dir: Base directory to clone into
+
+    Returns:
+        Path to the R3GAN directory
+    """
+    r3gan_path = os.path.join(base_dir, 'R3GAN')
+
+    if not os.path.exists(r3gan_path):
+        print("Cloning R3GAN repository...")
+        pygit2.clone_repository(R3GAN_REPO, r3gan_path)
+
+    return r3gan_path
 
 
 def get_gpu_memory_mb():
@@ -215,7 +245,27 @@ def show_styles():
 
     all_models = consolidate_models()
     styles = set([model['name'].lower() for model in all_models])
-    print(*styles, sep='\n')
+    print(*sorted(styles), sep='\n')
+
+
+def show_r3gan_styles():
+    '''Show available R3GAN model styles with descriptions.
+
+    R3GAN (NeurIPS 2024) is a modern GAN baseline that achieves
+    state-of-the-art FID scores with a simpler architecture than StyleGAN.
+
+    Paper: "The GAN is dead; long live the GAN! A Modern Baseline GAN"
+    https://arxiv.org/abs/2501.05441
+    '''
+    print("Available R3GAN Models:")
+    print("=" * 60)
+    for name, info in R3GAN_MODELS.items():
+        print(f"\n  {name}")
+        print(f"    Resolution: {info['resolution']}x{info['resolution']}")
+        print(f"    Classes: {info['num_classes']}")
+        print(f"    {info['description']}")
+    print("\n" + "=" * 60)
+    print("Usage: LucidSonicDream(song='song.mp3', style='r3gan_ffhq_256')")
 
 
 class LucidSonicDream:
@@ -267,8 +317,10 @@ class LucidSonicDream:
     self.use_fp16 = torch.cuda.is_available()  # Use FP16 on GPU for speed
     self.use_compile = hasattr(torch, 'compile')  # PyTorch 2.0+ compilation
 
-    # some stylegan models cannot be converted to pytorch (wikiart)
-    self.use_tf = style in ("wikiart",)
+    # Detect model type
+    self.use_r3gan = is_r3gan_style(style) if isinstance(style, str) else False
+    self.use_tf = style in ("wikiart",) if isinstance(style, str) else False
+
     if self.use_tf:
         stylegan_tf_path = os.path.join(stylegan_base, 'stylegan2_tf')
         print("Cloning old, tensorflow stylegan...")
@@ -284,6 +336,14 @@ class LucidSonicDream:
         self.convert_images_to_uint8 = tflib.convert_images_to_uint8
         self.init_tf = tflib.init_tf
         self.init_tf()
+    elif self.use_r3gan:
+        # Setup R3GAN repository
+        r3gan_path = setup_r3gan(stylegan_base)
+        if r3gan_path not in sys.path:
+            sys.path.insert(0, r3gan_path)
+        self.dnnlib = import_module("dnnlib")
+        self.legacy = import_module("legacy")
+        print("Using R3GAN - Modern GAN baseline (arxiv:2501.05441)")
     else:
         # Use StyleGAN3 (preferred) - backwards compatible with SG2 models
         stylegan_path = setup_stylegan(stylegan_base, use_stylegan3=True)
@@ -294,26 +354,35 @@ class LucidSonicDream:
     
 
   def stylegan_init(self):
-    '''Initialise StyleGAN2-ada-pytorch weights'''
+    '''Initialise StyleGAN2-ada-pytorch or R3GAN weights'''
 
     style = self.style
 
     # If style is not a .pkl file path, download weights from corresponding URL
     if '.pkl' not in style:
-      all_models = consolidate_models()
-      all_styles = [model['name'].lower() for model in all_models]
+      # Check if it's an R3GAN model first (faster lookup)
+      style_lower = style.lower()
+      if style_lower in R3GAN_MODELS:
+        model_info = R3GAN_MODELS[style_lower]
+        download_url = model_info['download_url']
+        weights_file = style + '.pkl'
+        print(f"R3GAN model: {model_info.get('description', style)}")
+      else:
+        # Fall back to consolidated models list
+        all_models = consolidate_models()
+        all_styles = [model['name'].lower() for model in all_models]
 
-      # Raise exception if style is not valid
-      if style not in all_styles:
-        raise StyleNotFoundError(
-            'Style not valid. Call show_styles() to see all '
-            'valid styles, or use your own .pkl file.'
-        )
+        # Raise exception if style is not valid
+        if style_lower not in all_styles:
+          raise StyleNotFoundError(
+              'Style not valid. Call show_styles() to see all '
+              'valid styles, or use your own .pkl file.'
+          )
 
-      download_url = [model for model in all_models \
-                      if model['name'].lower() == style][0]\
-                      ['download_url']
-      weights_file = style + '.pkl'
+        download_url = [model for model in all_models \
+                        if model['name'].lower() == style_lower][0]\
+                        ['download_url']
+        weights_file = style + '.pkl'
 
       # If style .pkl already exists in working directory, skip download
       if not os.path.exists(weights_file):
@@ -344,13 +413,19 @@ class LucidSonicDream:
         # Performance optimizations
         self.Gs.eval()  # Set to evaluation mode
 
-        # FP16 for faster inference on GPU (2x speedup on modern GPUs)
+        # For R3GAN, prefer BFloat16 over FP16 (per the paper's recommendations)
+        # R3GAN uses BFloat16 for mixed precision training
         if self.use_fp16 and self.device.type == 'cuda':
             try:
-                self.Gs = self.Gs.half()
-                print("Using FP16 precision for faster inference")
+                if self.use_r3gan and hasattr(torch, 'bfloat16'):
+                    # R3GAN prefers BFloat16
+                    self.Gs = self.Gs.to(torch.bfloat16)
+                    print("Using BFloat16 precision for R3GAN inference")
+                else:
+                    self.Gs = self.Gs.half()
+                    print("Using FP16 precision for faster inference")
             except Exception as e:
-                print(f"FP16 not supported for this model: {e}")
+                print(f"Mixed precision not supported for this model: {e}")
                 self.use_fp16 = False
 
         # torch.compile for PyTorch 2.0+ (can provide 20-50% speedup)
@@ -361,15 +436,24 @@ class LucidSonicDream:
             except Exception as e:
                 print(f"torch.compile() not available: {e}")
                 self.use_compile = False
-    
+
     # Auto assign num_possible_classes attribute
     try:
-      print(self.Gs.mapping.input_templates)
-      self.num_possible_classes = self.Gs.mapping.input_templates[1].shape[1]
+      # Try StyleGAN3/R3GAN format first
+      if hasattr(self.Gs, 'c_dim'):
+        self.num_possible_classes = self.Gs.c_dim
+      elif hasattr(self.Gs, 'mapping') and hasattr(self.Gs.mapping, 'input_templates'):
+        print(self.Gs.mapping.input_templates)
+        self.num_possible_classes = self.Gs.mapping.input_templates[1].shape[1]
+      else:
+        self.num_possible_classes = 0
     except ValueError:
-      print(self.Gs.mapping.static_kwargs.label_size)
-      self.num_possible_classes = self.Gs.components.mapping\
-                                  .static_kwargs.label_size
+      try:
+        print(self.Gs.mapping.static_kwargs.label_size)
+        self.num_possible_classes = self.Gs.components.mapping\
+                                    .static_kwargs.label_size
+      except Exception:
+        self.num_possible_classes = 0
     except Exception:
       self.num_possible_classes = 0      
 
@@ -823,14 +907,32 @@ class LucidSonicDream:
                 # Convert to tensor and move to device
                 noise_tensor = torch.from_numpy(noise_batch).to(device)
 
-                # Use FP16 if enabled (2x faster on modern GPUs)
+                # Use mixed precision if enabled
                 if self.use_fp16:
-                    noise_tensor = noise_tensor.half()
+                    if self.use_r3gan and hasattr(torch, 'bfloat16'):
+                        # R3GAN prefers BFloat16 over FP16
+                        noise_tensor = noise_tensor.to(torch.bfloat16)
+                    else:
+                        noise_tensor = noise_tensor.half()
 
                 # Use inference_mode for best performance (faster than no_grad)
                 with torch.inference_mode():
-                    w_batch = self.Gs.mapping(noise_tensor, class_batch)
-                    image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs)
+                    # R3GAN and StyleGAN both support mapping + synthesis interface
+                    # R3GAN also supports direct G(z, c) call, but mapping+synthesis
+                    # gives us access to W-space for smoother interpolation
+                    try:
+                        w_batch = self.Gs.mapping(noise_tensor, class_batch)
+                        image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs)
+                    except (AttributeError, TypeError):
+                        # Fallback to direct call if mapping/synthesis not available
+                        # This handles some R3GAN model variations
+                        class_tensor = torch.from_numpy(class_batch).to(device)
+                        if self.use_fp16:
+                            if self.use_r3gan and hasattr(torch, 'bfloat16'):
+                                class_tensor = class_tensor.to(torch.bfloat16)
+                            else:
+                                class_tensor = class_tensor.half()
+                        image_batch = self.Gs(noise_tensor, class_tensor)
 
                 # Move to CPU for post-processing
                 image_batch = image_batch.detach().cpu().float()

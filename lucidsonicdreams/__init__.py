@@ -4,10 +4,12 @@ from .main import (
     EffectsGenerator,
     # Utility functions
     show_styles,
+    show_r3gan_styles,
     is_colab,
     get_temp_dir,
     get_stylegan_base_dir,
     setup_stylegan,
+    setup_r3gan,
     get_gpu_memory_mb,
     get_free_gpu_memory_mb,
     estimate_memory_usage_mb,
@@ -20,14 +22,18 @@ from .main import (
     DownloadError,
 )
 
+from .helper_functions import R3GAN_MODELS, is_r3gan_style
+
 __all__ = [
     'LucidSonicDream',
     'EffectsGenerator',
     'show_styles',
+    'show_r3gan_styles',
     'is_colab',
     'get_temp_dir',
     'get_stylegan_base_dir',
     'setup_stylegan',
+    'setup_r3gan',
     'get_gpu_memory_mb',
     'get_free_gpu_memory_mb',
     'estimate_memory_usage_mb',
@@ -37,4 +43,7 @@ __all__ = [
     'StyleNotFoundError',
     'InvalidParameterError',
     'DownloadError',
+    # R3GAN support
+    'R3GAN_MODELS',
+    'is_r3gan_style',
 ]
