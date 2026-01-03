@@ -421,21 +421,28 @@ class LucidSonicDream:
         print(f'Loading networks from {weights_file}...')
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # For R3GAN models, ensure the R3GAN path is at the front of sys.path
-        # so that training.networks_baseline can be found during pickle unpickling
+        # Ensure correct dnnlib/legacy modules are loaded for the model type
+        stylegan_base = get_stylegan_base_dir()
         if self.use_r3gan:
-            stylegan_base = get_stylegan_base_dir()
-            r3gan_path = os.path.join(stylegan_base, 'R3GAN')
-            # Remove any existing R3GAN path entries and add to front
-            sys.path = [p for p in sys.path if 'R3GAN' not in p and 'stylegan' not in p.lower()]
-            sys.path.insert(0, r3gan_path)
-            # Force reimport of modules that may have been cached from stylegan3
-            for mod_name in list(sys.modules.keys()):
-                if mod_name.startswith('training') or mod_name in ('legacy', 'dnnlib'):
-                    del sys.modules[mod_name]
-            # Reimport with correct path
-            self.dnnlib = import_module("dnnlib")
-            self.legacy = import_module("legacy")
+            # For R3GAN models, ensure the R3GAN path is at the front of sys.path
+            # so that training.networks_baseline can be found during pickle unpickling
+            model_path = os.path.join(stylegan_base, 'R3GAN')
+        else:
+            # For StyleGAN models, use stylegan3 path
+            model_path = os.path.join(stylegan_base, 'stylegan3')
+
+        # Remove conflicting paths and add correct one to front
+        sys.path = [p for p in sys.path if 'R3GAN' not in p and 'stylegan' not in p.lower()]
+        sys.path.insert(0, model_path)
+
+        # Force reimport of modules to ensure correct dnnlib is used
+        for mod_name in list(sys.modules.keys()):
+            if mod_name.startswith(('training', 'dnnlib', 'legacy', 'torch_utils')):
+                del sys.modules[mod_name]
+
+        # Reimport with correct path
+        self.dnnlib = import_module("dnnlib")
+        self.legacy = import_module("legacy")
 
         with self.dnnlib.util.open_url(weights_file) as f:
             self.Gs = self.legacy.load_network_pkl(f)['G_ema'].to(self.device)
