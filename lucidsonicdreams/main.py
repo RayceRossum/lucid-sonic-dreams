@@ -474,20 +474,17 @@ class LucidSonicDream:
         # Performance optimizations
         self.Gs.eval()  # Set to evaluation mode
 
-        # For R3GAN, prefer BFloat16 over FP16 (per the paper's recommendations)
-        # R3GAN uses BFloat16 for mixed precision training
-        if self.use_fp16 and self.device.type == 'cuda':
+        # Mixed precision for faster inference
+        # R3GAN models have issues with bfloat16 conversion, so skip for now
+        if self.use_fp16 and self.device.type == 'cuda' and not self.use_r3gan:
             try:
-                if self.use_r3gan and hasattr(torch, 'bfloat16'):
-                    # R3GAN prefers BFloat16
-                    self.Gs = self.Gs.to(torch.bfloat16)
-                    print("Using BFloat16 precision for R3GAN inference")
-                else:
-                    self.Gs = self.Gs.half()
-                    print("Using FP16 precision for faster inference")
+                self.Gs = self.Gs.half()
+                print("Using FP16 precision for faster inference")
             except Exception as e:
                 print(f"Mixed precision not supported for this model: {e}")
                 self.use_fp16 = False
+        elif self.use_r3gan:
+            self.use_fp16 = False  # Disable for R3GAN
 
         # torch.compile for PyTorch 2.0+ (can provide 20-50% speedup)
         if self.use_compile and self.device.type == 'cuda':
