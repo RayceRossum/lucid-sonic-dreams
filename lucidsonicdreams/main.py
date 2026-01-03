@@ -368,6 +368,15 @@ class LucidSonicDream:
         # This is critical because R3GAN models need training.networks_baseline
         sys.path = [p for p in sys.path if 'stylegan' not in p.lower()]
         sys.path.insert(0, r3gan_path)
+
+        # Add torch extensions cache to path so JIT-compiled CUDA plugins can be imported
+        torch_ext_path = os.path.join(os.path.expanduser('~'), '.cache', 'torch_extensions')
+        if os.path.exists(torch_ext_path):
+            for subdir in os.listdir(torch_ext_path):
+                ext_subpath = os.path.join(torch_ext_path, subdir)
+                if ext_subpath not in sys.path:
+                    sys.path.insert(0, ext_subpath)
+
         # Force reimport - clear cached modules from stylegan3
         for mod_name in list(sys.modules.keys()):
             if mod_name.startswith(('training', 'dnnlib', 'legacy', 'torch_utils')):
