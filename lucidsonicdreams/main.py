@@ -16,7 +16,8 @@ from PIL import Image, ImageEnhance
 import skimage.exposure
 import librosa
 import soundfile
-import moviepy.editor as mpy
+# MoviePy 2.x compatible imports
+from moviepy import VideoFileClip, ImageSequenceClip, AudioFileClip
 from moviepy.audio.AudioClip import AudioArrayClip
 import pygit2
 from importlib import import_module
@@ -1129,9 +1130,9 @@ class LucidSonicDream:
     print('\nGenerating movie...\n')
     if np.any(all_frames):  # If frames not passed back, then they're in folder
         imageio.mimwrite(temp_video_path, all_frames, quality=8, fps=self.sr/self.frame_duration)
-        video = mpy.VideoFileClip(temp_video_path)
+        video = VideoFileClip(temp_video_path)
     else:
-        video = mpy.ImageSequenceClip(self.frames_dir, fps=self.sr/self.frame_duration)
+        video = ImageSequenceClip(self.frames_dir, fps=self.sr/self.frame_duration)
 
     # Write temporary audio file - fixing the soundfile write
     try:
@@ -1147,7 +1148,7 @@ class LucidSonicDream:
 
     # Mix audio & video with codec fallback for Colab compatibility
     try:
-        audio = mpy.AudioFileClip(temp_audio_path, fps=self.sr*2)
+        audio = AudioFileClip(temp_audio_path, fps=self.sr*2)
         video = video.set_audio(audio)
         write_video_with_codec_fallback(video, self.file_name, audio_bitrate="1024k")
     finally:
