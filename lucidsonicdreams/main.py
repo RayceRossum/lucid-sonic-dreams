@@ -90,6 +90,24 @@ def get_stylegan_base_dir():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def get_weights_cache_dir():
+    """Get directory for caching model weights (persists on Google Drive if mounted)"""
+    if is_colab():
+        # Use Google Drive if mounted for persistent storage
+        drive_path = '/content/drive/MyDrive/LucidSonicDreams/models'
+        if os.path.exists('/content/drive/MyDrive'):
+            os.makedirs(drive_path, exist_ok=True)
+            return drive_path
+        # Fall back to /content if Drive not mounted
+        content_path = '/content/models'
+        os.makedirs(content_path, exist_ok=True)
+        return content_path
+    # Local: use cache directory in user's home
+    cache_path = os.path.join(os.path.expanduser('~'), '.cache', 'lucidsonicdreams', 'models')
+    os.makedirs(cache_path, exist_ok=True)
+    return cache_path
+
+
 # StyleGAN3 repo URL (preferred over StyleGAN2 - better maintained, same API)
 STYLEGAN3_REPO = 'https://github.com/NVlabs/stylegan3.git'
 STYLEGAN2_REPO = 'https://github.com/NVlabs/stylegan2-ada-pytorch.git'
@@ -373,12 +391,15 @@ class LucidSonicDream:
 
     # If style is not a .pkl file path, download weights from corresponding URL
     if '.pkl' not in style:
+      # Get cache directory for persistent storage
+      cache_dir = get_weights_cache_dir()
+
       # Check if it's an R3GAN model first (faster lookup)
       style_lower = style.lower()
       if style_lower in R3GAN_MODELS:
         model_info = R3GAN_MODELS[style_lower]
         download_url = model_info['download_url']
-        weights_file = style + '.pkl'
+        weights_file = os.path.join(cache_dir, style + '.pkl')
         print(f"R3GAN model: {model_info.get('description', style)}")
       else:
         # Fall back to consolidated models list
@@ -395,11 +416,12 @@ class LucidSonicDream:
         download_url = [model for model in all_models \
                         if model['name'].lower() == style_lower][0]\
                         ['download_url']
-        weights_file = style + '.pkl'
+        weights_file = os.path.join(cache_dir, style + '.pkl')
 
-      # If style .pkl already exists in working directory, skip download
+      # If style .pkl already exists in cache, skip download
       if not os.path.exists(weights_file):
         print('Downloading {} weights (This may take a while)...'.format(style))
+        print(f'Caching to: {weights_file}')
         try:
           download_weights(download_url, weights_file)
         except Exception as e:
@@ -408,6 +430,8 @@ class LucidSonicDream:
               f'and pass the file path to the style parameter. Error: {e}'
           )
         print('Download complete')
+      else:
+        print(f'Using cached weights: {weights_file}')
 
     else:
       weights_file = style
