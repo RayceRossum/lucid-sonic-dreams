@@ -27,7 +27,7 @@ except ImportError:
 R3GAN_MODELS = {
     'r3gan_ffhq_256': {
         'name': 'r3gan_ffhq_256',
-        'download_url': 'https://huggingface.co/brownvc/R3GAN-FFHQ-256x256/resolve/main/ffhq-256x256.pkl',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-FFHQ-256x256/resolve/main/network-snapshot-final.pkl',
         'resolution': 256,
         'num_classes': 0,
         'type': 'r3gan',
@@ -35,7 +35,7 @@ R3GAN_MODELS = {
     },
     'r3gan_ffhq_64': {
         'name': 'r3gan_ffhq_64',
-        'download_url': 'https://huggingface.co/brownvc/R3GAN-FFHQ-64x64/resolve/main/ffhq-64x64.pkl',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-FFHQ-64x64/resolve/main/network-snapshot-final.pkl',
         'resolution': 64,
         'num_classes': 0,
         'type': 'r3gan',
@@ -43,7 +43,7 @@ R3GAN_MODELS = {
     },
     'r3gan_cifar10': {
         'name': 'r3gan_cifar10',
-        'download_url': 'https://huggingface.co/brownvc/R3GAN-CIFAR10/resolve/main/cifar10.pkl',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-CIFAR10/resolve/main/network-snapshot-final.pkl',
         'resolution': 32,
         'num_classes': 10,
         'type': 'r3gan',
@@ -51,7 +51,7 @@ R3GAN_MODELS = {
     },
     'r3gan_imagenet_64': {
         'name': 'r3gan_imagenet_64',
-        'download_url': 'https://huggingface.co/brownvc/R3GAN-ImgNet-64x64/resolve/main/imagenet-64x64.pkl',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-ImgNet-64x64/resolve/main/network-snapshot-final.pkl',
         'resolution': 64,
         'num_classes': 1000,
         'type': 'r3gan',
@@ -59,7 +59,7 @@ R3GAN_MODELS = {
     },
     'r3gan_imagenet_32': {
         'name': 'r3gan_imagenet_32',
-        'download_url': 'https://huggingface.co/brownvc/R3GAN-ImgNet-32x32/resolve/main/imagenet-32x32.pkl',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-ImgNet-32x32/resolve/main/ImageNet-32x32.pkl',
         'resolution': 32,
         'num_classes': 1000,
         'type': 'r3gan',
