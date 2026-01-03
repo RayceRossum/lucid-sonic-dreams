@@ -1,7 +1,9 @@
 import sys
 import os
 import shutil
-import pickle 
+import pickle
+import tempfile
+from pathlib import Path
 from tqdm import tqdm
 import inspect
 import numpy as np
@@ -19,13 +21,170 @@ from moviepy.audio.AudioClip import AudioArrayClip
 import pygit2
 from importlib import import_module
 
-from .helper_functions import * 
+from .helper_functions import *
 from .sample_effects import *
 
 import imageio
 
 # For speed
 torch.backends.cudnn.benchmark = True
+
+
+# =============================================================================
+# Custom Exceptions
+# =============================================================================
+
+class LucidSonicDreamError(Exception):
+    """Base exception for lucid-sonic-dreams"""
+    pass
+
+
+class StyleNotFoundError(LucidSonicDreamError):
+    """Style not found in available styles"""
+    pass
+
+
+class InvalidParameterError(LucidSonicDreamError):
+    """Invalid parameter value"""
+    pass
+
+
+class DownloadError(LucidSonicDreamError):
+    """Failed to download model weights"""
+    pass
+
+
+# =============================================================================
+# Colab Compatibility Utilities
+# =============================================================================
+
+def is_colab():
+    """Detect if running in Google Colab"""
+    try:
+        import google.colab
+        return True
+    except ImportError:
+        return False
+
+
+def get_temp_dir():
+    """Get appropriate temp directory based on environment"""
+    if is_colab():
+        return '/tmp'
+    return tempfile.gettempdir()
+
+
+def get_stylegan_base_dir():
+    """Get base directory for StyleGAN repositories"""
+    if is_colab():
+        return '/content'
+    # Use directory relative to this module
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# StyleGAN3 repo URL (preferred over StyleGAN2 - better maintained, same API)
+STYLEGAN3_REPO = 'https://github.com/NVlabs/stylegan3.git'
+STYLEGAN2_REPO = 'https://github.com/NVlabs/stylegan2-ada-pytorch.git'
+
+
+def setup_stylegan(base_dir, use_stylegan3=True):
+    """Setup StyleGAN repository with proper path handling.
+
+    Args:
+        base_dir: Base directory to clone into
+        use_stylegan3: If True, use StyleGAN3 (recommended). Falls back to SG2 if needed.
+
+    Returns:
+        Path to the StyleGAN directory
+    """
+    sg3_path = os.path.join(base_dir, 'stylegan3')
+    sg2_path = os.path.join(base_dir, 'stylegan2')
+
+    # Prefer StyleGAN3
+    if use_stylegan3:
+        if not os.path.exists(sg3_path):
+            print("Cloning StyleGAN3 repository...")
+            pygit2.clone_repository(STYLEGAN3_REPO, sg3_path)
+
+        # Create symlink for backwards compatibility
+        if not os.path.exists(sg2_path):
+            try:
+                os.symlink(sg3_path, sg2_path)
+            except OSError:
+                pass  # Symlink may fail on some systems, that's OK
+
+        return sg3_path
+    else:
+        if not os.path.exists(sg2_path):
+            print("Cloning StyleGAN2-ada-pytorch repository...")
+            pygit2.clone_repository(STYLEGAN2_REPO, sg2_path)
+        return sg2_path
+
+
+def get_gpu_memory_mb():
+    """Get total GPU memory in MB, or 0 if no GPU"""
+    if torch.cuda.is_available():
+        return torch.cuda.get_device_properties(0).total_memory / 1024 / 1024
+    return 0
+
+
+def get_free_gpu_memory_mb():
+    """Get free GPU memory in MB, or 0 if no GPU"""
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info()
+        return free / 1024 / 1024
+    return 0
+
+
+def estimate_memory_usage_mb(resolution, batch_size):
+    """Estimate GPU memory usage in MB for given parameters"""
+    # Rough estimation based on typical StyleGAN2 usage
+    base_model = 1500  # ~1.5GB for model weights
+    per_frame = (resolution ** 2 * 3 * 4) / 1024 / 1024  # RGB float32
+    return base_model + (per_frame * batch_size * 3)  # 3x for intermediate activations
+
+
+def suggest_batch_size(resolution, available_memory_mb=None):
+    """Suggest appropriate batch size for available GPU memory"""
+    if available_memory_mb is None:
+        available_memory_mb = get_gpu_memory_mb()
+
+    if available_memory_mb == 0:
+        return 1  # CPU mode
+
+    # Conservative estimates for common GPU configurations
+    if available_memory_mb < 8000:  # < 8GB (K80, older GPUs)
+        return 1
+    elif available_memory_mb < 16000:  # < 16GB (T4, RTX 3080)
+        if resolution >= 1024:
+            return 1
+        elif resolution >= 512:
+            return 2
+        return 4
+    else:  # >= 16GB (A100, V100, RTX 4090)
+        if resolution >= 1024:
+            return 2
+        elif resolution >= 512:
+            return 4
+        return 8
+
+
+def write_video_with_codec_fallback(video, file_name, audio_bitrate="1024k"):
+    """Write video file with automatic codec fallback for compatibility"""
+    codecs = ['aac', 'libmp3lame', 'mp3']
+    last_error = None
+
+    for codec in codecs:
+        try:
+            video.write_videofile(file_name, audio_codec=codec, audio_bitrate=audio_bitrate)
+            return  # Success
+        except Exception as e:
+            last_error = e
+            if codec != codecs[-1]:
+                print(f"Codec '{codec}' failed, trying next...")
+            continue
+
+    raise RuntimeError(f"Failed to write video with any codec. Last error: {last_error}")
 
 def import_stylegan_torch():
     # Clone Official StyleGAN2-ADA-pytorch Repository
@@ -60,7 +219,7 @@ def show_styles():
 
 
 class LucidSonicDream:
-  def __init__(self, 
+  def __init__(self,
                song: str,
                pulse_audio: str = None,
                motion_audio: str = None,
@@ -69,23 +228,25 @@ class LucidSonicDream:
                flash_audio: str = None,
                style: str = 'wikiart',
                input_shape: int = None,
-               num_possible_classes: int = None): 
+               num_possible_classes: int = None):
 
-    # If style is a function, raise exception if function does not take 
+    # If style is a function, raise exception if function does not take
     # noise_batch or class_batch parameters
     if callable(style):
-     
+
         func_sig = list(inspect.getfullargspec(style))[0]
 
         for arg in ['noise_batch', 'class_batch']:
             if arg not in func_sig:
-                sys.exit('func must be a function with parameters '\
-                       'noise_batch and class_batch')
+                raise InvalidParameterError(
+                    'func must be a function with parameters noise_batch and class_batch'
+                )
 
         # Raise exception if input_shape or num_possible_classes is not provided
         if (input_shape is None) or (num_possible_classes is None):
-            sys.exit('input_shape and num_possible_classes '\
-                     'must be provided if style is a function')
+            raise InvalidParameterError(
+                'input_shape and num_possible_classes must be provided if style is a function'
+            )
 
     # Define attributes
     self.song = song
@@ -96,35 +257,38 @@ class LucidSonicDream:
     self.flash_audio = flash_audio
     self.style = style
     self.input_shape = input_shape or 512
-    self.num_possible_classes = num_possible_classes 
+    self.num_possible_classes = num_possible_classes
     self.style_exists = False
-    
+
+    # Get base directory for StyleGAN repos (Colab-compatible)
+    stylegan_base = get_stylegan_base_dir()
+
+    # Performance options
+    self.use_fp16 = torch.cuda.is_available()  # Use FP16 on GPU for speed
+    self.use_compile = hasattr(torch, 'compile')  # PyTorch 2.0+ compilation
+
     # some stylegan models cannot be converted to pytorch (wikiart)
     self.use_tf = style in ("wikiart",)
     if self.use_tf:
-        # import_stylegan_tf()
+        stylegan_tf_path = os.path.join(stylegan_base, 'stylegan2_tf')
         print("Cloning old, tensorflow stylegan...")
-        if not os.path.exists('stylegan2_tf'):
+        if not os.path.exists(stylegan_tf_path):
             pygit2.clone_repository('https://github.com/NVlabs/stylegan2-ada.git',
-                                  'stylegan2_tf')
+                                  stylegan_tf_path)
 
-        #StyleGAN2 Imports
-        sys.path.append("stylegan2_tf")
+        # StyleGAN2 Imports
+        if stylegan_tf_path not in sys.path:
+            sys.path.insert(0, stylegan_tf_path)
         self.dnnlib = import_module("dnnlib")
-        #import dnnlib as dnnlib
-        #from dnnlib.tflib.tfutil import convert_images_to_uint8
         tflib = import_module("dnnlib.tflib.tfutil")
-        self.convert_images_to_uint8 = tflib.convert_images_to_uint8 #import_module("dnnlib.tflib.tfutil", fromlist=["convert_images_to_uint8"])
-        self.init_tf = tflib.init_tf #import_module("dnnlib.tflib.tfutil", fromlist=["init_tf"])
+        self.convert_images_to_uint8 = tflib.convert_images_to_uint8
+        self.init_tf = tflib.init_tf
         self.init_tf()
     else:
-        # import_stylegan_torch()
-        # Clone Official StyleGAN2-ADA-pytorch Repository
-        if not os.path.exists('stylegan2'):
-            pygit2.clone_repository('https://github.com/NVlabs/stylegan2-ada-pytorch.git',
-                                  'stylegan2')
-        # StyleGan2-ada-pytorch imports
-        sys.path.append("stylegan2")
+        # Use StyleGAN3 (preferred) - backwards compatible with SG2 models
+        stylegan_path = setup_stylegan(stylegan_base, use_stylegan3=True)
+        if stylegan_path not in sys.path:
+            sys.path.insert(0, stylegan_path)
         self.dnnlib = import_module("dnnlib")
         self.legacy = import_module("legacy")
     
@@ -140,9 +304,11 @@ class LucidSonicDream:
       all_styles = [model['name'].lower() for model in all_models]
 
       # Raise exception if style is not valid
-      if style not in all_styles:  
-        sys.exit('Style not valid. Call show_styles() to see all ' \
-        'valid styles, or use your own .pkl file.')
+      if style not in all_styles:
+        raise StyleNotFoundError(
+            'Style not valid. Call show_styles() to see all '
+            'valid styles, or use your own .pkl file.'
+        )
 
       download_url = [model for model in all_models \
                       if model['name'].lower() == style][0]\
@@ -154,11 +320,11 @@ class LucidSonicDream:
         print('Downloading {} weights (This may take a while)...'.format(style))
         try:
           download_weights(download_url, weights_file)
-        except Exception:
-          exc_msg = 'Download failed. Try to download weights directly at {} '\
-                    'and pass the file path to the style parameter'\
-                    .format(download_url)
-          sys.exit(exc_msg)
+        except Exception as e:
+          raise DownloadError(
+              f'Download failed. Try to download weights directly at {download_url} '
+              f'and pass the file path to the style parameter. Error: {e}'
+          )
         print('Download complete')
 
     else:
@@ -171,9 +337,30 @@ class LucidSonicDream:
             self.Gs = pickle.load(f)[2]
     else:
         print(f'Loading networks from {weights_file}...')
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         with self.dnnlib.util.open_url(weights_file) as f:
-            self.Gs = self.legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+            self.Gs = self.legacy.load_network_pkl(f)['G_ema'].to(self.device)
+
+        # Performance optimizations
+        self.Gs.eval()  # Set to evaluation mode
+
+        # FP16 for faster inference on GPU (2x speedup on modern GPUs)
+        if self.use_fp16 and self.device.type == 'cuda':
+            try:
+                self.Gs = self.Gs.half()
+                print("Using FP16 precision for faster inference")
+            except Exception as e:
+                print(f"FP16 not supported for this model: {e}")
+                self.use_fp16 = False
+
+        # torch.compile for PyTorch 2.0+ (can provide 20-50% speedup)
+        if self.use_compile and self.device.type == 'cuda':
+            try:
+                self.Gs = torch.compile(self.Gs, mode='reduce-overhead')
+                print("Using torch.compile() for optimized inference")
+            except Exception as e:
+                print(f"torch.compile() not available: {e}")
+                self.use_compile = False
     
     # Auto assign num_possible_classes attribute
     try:
@@ -293,58 +480,70 @@ class LucidSonicDream:
     motion_signs = self.motion_signs
     current_noise = self.current_noise
 
-    # For each current value in noise vector, change direction if absolute 
+    # Vectorized version - much faster than np.vectorize which is just a loop
+    # For each current value in noise vector, change direction if absolute
     # value +/- motion_react is larger than 2*truncation
-    update = lambda cn, ms: 1 if cn - m < -2*t else \
-                           -1 if cn + m >= 2*t else ms
-    update_vec = np.vectorize(update)
-
-    return update_vec(current_noise, motion_signs)
+    result = motion_signs.copy()
+    result[current_noise - m < -2*t] = 1
+    result[current_noise + m >= 2*t] = -1
+    return result
 
   def generate_class_vec(self, frame):
-    '''Generate a class vector using chromagram, where each pitch 
+    '''Generate a class vector using chromagram, where each pitch
        corresponds to a class'''
 
-    classes = self.classes 
-    chrom_class = self.chrom_class 
-    class_vecs = self.class_vecs 
+    classes = self.classes
+    chrom_class = self.chrom_class
+    class_vecs = self.class_vecs
     num_possible_classes = self.num_possible_classes
     class_complexity = self.class_complexity
     class_pitch_react = self.class_pitch_react * 43 / self.fps
 
-    # For the first class vector, simple use values from 
-    # the first point in time where at least one pitch > 0 
-    # (controls for silence at the start of a track)
-    if len(class_vecs) == 0:
+    # Pre-allocate class vector with zeros
+    class_vec = np.zeros(num_possible_classes, dtype=np.float32)
 
-      first_chrom = chrom_class[:,np.min(np.where(chrom_class.sum(axis=0) > 0))]
-      update_dict = dict(zip(classes, first_chrom))
-      class_vec = np.array([update_dict.get(i) \
-                            if update_dict.get(i) is not None \
-                            else 0 \
-                            for i in range(num_possible_classes)])
-    
+    # For the first class vector, use values from the first point in time
+    # where at least one pitch > 0 (controls for silence at the start)
+    if len(class_vecs) == 0:
+      col_sums = chrom_class.sum(axis=0)
+      nonzero_cols = np.where(col_sums > 0)[0]
+      if len(nonzero_cols) > 0:
+        first_chrom = chrom_class[:, nonzero_cols[0]]
+      else:
+        first_chrom = chrom_class[:, 0]
+
+      # Vectorized assignment using numpy indexing
+      valid_classes = np.array(classes[:len(first_chrom)])
+      valid_mask = valid_classes < num_possible_classes
+      class_vec[valid_classes[valid_mask]] = first_chrom[valid_mask]
+
     # For succeeding vectors, update class values scaled by class_pitch_react
     else:
+      chrom_values = chrom_class[:, frame]
+      update_vec = np.zeros(num_possible_classes, dtype=np.float32)
 
-      update_dict = dict(zip(classes, chrom_class[:,frame]))
-      class_vec = class_vecs[frame - 1] +\
-                  class_pitch_react * \
-                  np.array([update_dict.get(i) \
-                            if update_dict.get(i) is not None \
-                            else 0 \
-                            for i in range(num_possible_classes)])
-            
+      # Vectorized assignment
+      valid_classes = np.array(classes[:len(chrom_values)])
+      valid_mask = valid_classes < num_possible_classes
+      update_vec[valid_classes[valid_mask]] = chrom_values[valid_mask]
+
+      class_vec = class_vecs[frame - 1] + class_pitch_react * update_vec
+
     # Normalize class vector between 0 and 1
-    if np.where(class_vec != 0)[0].shape[0] != 0:
-      class_vec[class_vec < 0] = np.min(class_vec[class_vec >= 0])
-      class_vec = (class_vec - np.min(class_vec))/np.ptp(class_vec)
+    nonzero_mask = class_vec != 0
+    if np.any(nonzero_mask):
+      positive_vals = class_vec[class_vec >= 0]
+      if len(positive_vals) > 0:
+        class_vec[class_vec < 0] = np.min(positive_vals)
+      ptp = np.ptp(class_vec)
+      if ptp > 0:
+        class_vec = (class_vec - np.min(class_vec)) / ptp
 
     # If all values in class vector are equal, add 0.1 to first value
-    if (len(class_vec) > 0) and (np.all(class_vec == class_vec[0])):
+    if num_possible_classes > 0 and np.all(class_vec == class_vec[0]):
       class_vec[0] += 0.1
 
-    return class_vec*class_complexity
+    return class_vec * class_complexity
             
 
   def is_shuffle_frame(self, frame):
@@ -379,96 +578,91 @@ class LucidSonicDream:
     class_shuffle_seconds = self.class_shuffle_seconds or [0]
     class_shuffle_strength = round(self.class_shuffle_strength * 12)
     fps = self.fps
-    class_smooth_frames = self.class_smooth_seconds * fps
+    class_smooth_frames = int(self.class_smooth_seconds * fps)
     motion_react = self.motion_react * 20 / fps
 
-
-    print(self.wav)
-    print(self.sr)
     # Get number of noise vectors to initialise (based on speed_fpm)
     num_init_noise = round(
       librosa.get_duration(path=self.wav, sr=self.sr)/60*self.speed_fpm)
-    
-    # If num_init_noise < 2, simply initialise the same 
-    # noise vector for all frames 
-    if num_init_noise < 2:
 
-      noise = [self.truncation * \
-               truncnorm.rvs(-2, 2, 
-                             size = (self.batch_size, self.input_shape)) \
-                        .astype(np.float32)[0]] * \
-              len(self.spec_norm_class)
+    num_frames = len(self.spec_norm_class)
+
+    # If num_init_noise < 2, simply initialise the same
+    # noise vector for all frames
+    if num_init_noise < 2:
+      base_noise = self.truncation * \
+               truncnorm.rvs(-2, 2,
+                             size=(self.batch_size, self.input_shape)) \
+                        .astype(np.float32)[0]
+      noise = [base_noise.copy() for _ in range(num_frames)]
 
     # Otherwise, initialise num_init_noise different vectors, and generate
     # linear interpolations between these vectors
-    else: 
-
-      # initialise vectors
-      init_noise = [self.truncation * \
-                    truncnorm.rvs(-2, 2, 
-                                  size=(self.batch_size, self.input_shape)) \
-                             .astype(np.float32)[0]\
-                    for i in range(num_init_noise)]
+    else:
+      # Vectorized initialization of noise vectors
+      init_noise = self.truncation * \
+                   truncnorm.rvs(-2, 2,
+                                 size=(num_init_noise, self.input_shape)) \
+                            .astype(np.float32)
 
       # Compute number of steps between each pair of vectors
-      steps = int(np.floor(len(self.spec_norm_class))/len(init_noise)- 1)
+      steps = int(np.floor(num_frames) / len(init_noise) - 1)
 
       # Interpolate
-      noise = full_frame_interpolation(init_noise, 
+      noise = full_frame_interpolation(init_noise,
                                        steps,
-                                       len(self.spec_norm_class))
+                                       num_frames)
 
-    # initialise lists of Pulse, Motion, and Class vectors
-    pulse_noise = []
-    motion_noise = []
+    # Pre-allocate arrays instead of using append (much faster)
+    pulse_noise = np.empty((num_frames, self.input_shape), dtype=np.float32)
+    motion_noise = np.empty((num_frames, self.input_shape), dtype=np.float32)
     self.class_vecs = []
 
-    # initialise "base" vectors based on Pulse/Motion Reactivity values
-    pulse_base = np.array([self.pulse_react]*self.input_shape)
-    motion_base = np.array([motion_react]*self.input_shape)
+    # Use np.full instead of np.array([x]*n) - faster
+    pulse_base = np.full(self.input_shape, self.pulse_react, dtype=np.float32)
+    motion_base = np.full(self.input_shape, motion_react, dtype=np.float32)
 
-    # Randomly initialise "update directions" of noise vectors
-    self.motion_signs = np.array([random.choice([1,-1]) \
-                                  for n in range(self.input_shape)])
+    # Use np.random.choice instead of list comprehension - vectorized
+    self.motion_signs = np.random.choice([1, -1], size=self.input_shape).astype(np.float32)
 
-    # Randomly initialise factors based on motion_randomness
-    rand_factors = np.array([random.choice([1,1-self.motion_randomness]) \
-                             for n in range(self.input_shape)])
+    # Vectorized random factors
+    rand_choices = np.array([1, 1 - self.motion_randomness], dtype=np.float32)
+    rand_factors = np.random.choice(rand_choices, size=self.input_shape)
 
-    
-    cumm_motion_noise = 0
-    for i in range(len(self.spec_norm_class)):
+    # Pre-compute refresh interval
+    refresh_interval = max(1, round(fps * 4))
 
-      # UPDATE NOISE # 
+    cumm_motion_noise = np.zeros(self.input_shape, dtype=np.float32)
 
-      # Re-initialise randomness factors every 4 seconds
-      if i % round(fps*4) == 0:
-        rand_factors = np.array([random.choice([1, 1-self.motion_randomness]) \
-                             for n in range(self.input_shape)])
+    for i in range(num_frames):
+
+      # UPDATE NOISE #
+
+      # Re-initialise randomness factors every 4 seconds (vectorized)
+      if i % refresh_interval == 0:
+        rand_factors = np.random.choice(rand_choices, size=self.input_shape)
 
       # Generate incremental update vectors for Pulse and Motion
-      pulse_noise_add =  pulse_base * self.spec_norm_pulse[i]
+      pulse_noise_add = pulse_base * self.spec_norm_pulse[i]
       motion_noise_add = motion_base * self.spec_norm_motion[i] * \
                          self.motion_signs * rand_factors
 
       # Smooth each update vector using a weighted average of
       # itself and the previous vector
       if i > 0:
-        pulse_noise_add = pulse_noise[i-1]*PULSE_SMOOTH + \
-                          pulse_noise_add*(1 - PULSE_SMOOTH)
-        motion_noise_add = motion_noise[i-1]*MOTION_SMOOTH + \
-                           motion_noise_add*(1 - MOTION_SMOOTH)
+        pulse_noise_add = pulse_noise[i-1] * PULSE_SMOOTH + \
+                          pulse_noise_add * (1 - PULSE_SMOOTH)
+        motion_noise_add = motion_noise[i-1] * MOTION_SMOOTH + \
+                           motion_noise_add * (1 - MOTION_SMOOTH)
 
-      # Append Pulse and Motion update vectors to respective lists
-      pulse_noise.append(pulse_noise_add)
-      motion_noise.append(motion_noise_add)
+      # Store in pre-allocated arrays
+      pulse_noise[i] = pulse_noise_add
+      motion_noise[i] = motion_noise_add
       cumm_motion_noise += motion_noise_add
-      # Update current noise vector by adding current Pulse vector and 
-      # a cumulative sum of Motion vectors
-      #noise[i] = noise[i] + pulse_noise_add + sum(motion_noise[:i+1])
+
+      # Update current noise vector
       noise[i] = noise[i] + pulse_noise_add + cumm_motion_noise
-      
-      self.noise = noise
+
       self.current_noise = noise[i]
 
       # Update directions
@@ -476,29 +670,36 @@ class LucidSonicDream:
 
       # UPDATE CLASSES #
 
-      # TODO: Is it possible here to throw in a different model??? Or maybe this is just saying switch this proportion to the other class
       # If current frame is a shuffle frame, shuffle classes accordingly
       if self.is_shuffle_frame(i):
         self.classes = self.classes[class_shuffle_strength:] + \
                        self.classes[:class_shuffle_strength]
 
       # Generate class update vector and append to list
-      class_vec_add = self.generate_class_vec(frame = i)
+      class_vec_add = self.generate_class_vec(frame=i)
       self.class_vecs.append(class_vec_add)
 
-    # Smoothen class vectors by obtaining the mean vector per 
+    # Store final noise
+    self.noise = noise
+
+    # Smoothen class vectors by obtaining the mean vector per
     # class_smooth_frames frames, and interpolating between these vectors
     if class_smooth_frames > 1:
+      # Convert to numpy array for faster operations
+      class_vecs_array = np.array(self.class_vecs)
+      num_class_frames = len(class_vecs_array)
 
-      # Obtain mean vectors
-      class_frames_interp = [np.mean(self.class_vecs[i:i + class_smooth_frames], 
-                                     axis = 0) \
-                            for i in range(0, len(self.class_vecs), 
-                                           class_smooth_frames)]
+      # Compute mean vectors using array slicing (faster than list comprehension)
+      num_segments = (num_class_frames + class_smooth_frames - 1) // class_smooth_frames
+      class_frames_interp = []
+      for i in range(0, num_class_frames, class_smooth_frames):
+        end_idx = min(i + class_smooth_frames, num_class_frames)
+        class_frames_interp.append(np.mean(class_vecs_array[i:end_idx], axis=0))
+
       # Interpolate
-      self.class_vecs = full_frame_interpolation(class_frames_interp, 
-                                            class_smooth_frames, 
-                                            len(self.class_vecs))
+      self.class_vecs = full_frame_interpolation(class_frames_interp,
+                                            class_smooth_frames,
+                                            num_class_frames)
       
 
   def setup_effects(self):
@@ -557,13 +758,9 @@ class LucidSonicDream:
     frame_batch_size = self.frame_batch_size
     
     num_frame_batches = int(len(self.noise) / batch_size)
-    max_frame_index = num_frame_batches * batch_size + batch_size  
-
-    print(frame_batch_size)
-    print(max_frame_index)
+    max_frame_index = num_frame_batches * batch_size + batch_size
 
     on_disk = not(bool(frame_batch_size != None) & bool(max_frame_index <= frame_batch_size))
-    print("Storing frames on disk:\t" + str(on_disk))
 
     if self.use_tf:
         Gs_syn_kwargs = {'output_transform': {'func': self.convert_images_to_uint8, 
@@ -575,7 +772,7 @@ class LucidSonicDream:
 
     # Set-up temporary frame directory
     # Fixme: Save images to RAM
-    self.frames_dir = file_name.split('.mp4')[0] + '_frames'
+    self.frames_dir = str(Path(file_name).stem) + '_frames'
     
     if on_disk:
       if os.path.exists(self.frames_dir):
@@ -589,12 +786,13 @@ class LucidSonicDream:
     else:
       all_frames = np.empty(shape=[num_frame_batches, resolution, resolution, 3], dtype=np.uint8)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Use stored device from model loading, or create new one for custom styles
+    device = getattr(self, 'device', torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
     # Generate frames
     num_batches = 0
     frame_count = 0
-    for i in tqdm(range(num_frame_batches), position=0, leave=True):
+    for i in tqdm(range(num_frame_batches), position=0, leave=True, desc="Generating frames"):
         if on_disk and frame_count == frame_batch_size:
             # if batch size met, frames write to disk, reset array 
             # Save. Include leading zeros in file name to keep alphabetical order
@@ -609,29 +807,36 @@ class LucidSonicDream:
           # all_frames = np.empty(shape=[frame_batch_size, resolution, resolution, 3], dtype=np.uint8)
 
         # Obtain batches of Noise and Class vectors based on batch_size
-        noise_batch = np.array(self.noise[i*batch_size:(i+1)*batch_size])
-        class_batch = np.array(self.class_vecs[i*batch_size:(i+1)*batch_size])
+        noise_batch = np.array(self.noise[i*batch_size:(i+1)*batch_size], dtype=np.float32)
+        class_batch = np.array(self.class_vecs[i*batch_size:(i+1)*batch_size], dtype=np.float32)
 
         # If style is a custom function, pass batches to the function
-        if callable(self.style): 
-            image_batch = self.style(noise_batch=noise_batch, 
+        if callable(self.style):
+            image_batch = self.style(noise_batch=noise_batch,
                                    class_batch=class_batch)
-        # Otherwise, generate frames with StyleGAN(2)
+        # Otherwise, generate frames with StyleGAN
         else:
             if self.use_tf:
                 w_batch = self.Gs.components.mapping.run(noise_batch, np.tile(class_batch, (batch_size, 1)))
                 image_batch = self.Gs.components.synthesis.run(w_batch, **Gs_syn_kwargs)
             else:
-                noise_batch = torch.from_numpy(noise_batch).to(device)
-                w_batch = self.Gs.mapping(noise_batch, class_batch)
-                with torch.no_grad(): # Can this be sped up? https://developer.nvidia.com/blog/accelerating-inference-up-to-6x-faster-in-pytorch-with-torch-tensorrt/
-                    image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs).detach().cpu()
+                # Convert to tensor and move to device
+                noise_tensor = torch.from_numpy(noise_batch).to(device)
 
-      # TODO: Create generator function that yields results and adds them to array
-      # Such that we are continuously feeding the gpu with data 
+                # Use FP16 if enabled (2x faster on modern GPUs)
+                if self.use_fp16:
+                    noise_tensor = noise_tensor.half()
+
+                # Use inference_mode for best performance (faster than no_grad)
+                with torch.inference_mode():
+                    w_batch = self.Gs.mapping(noise_tensor, class_batch)
+                    image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs)
+
+                # Move to CPU for post-processing
+                image_batch = image_batch.detach().cpu().float()
 
         # For each image in generated batch: apply effects, resize, and save
-        for j, image in enumerate(image_batch): 
+        for j, image in enumerate(image_batch):
             image_index = (i * batch_size) + j
             if not self.use_tf:
                 image = (image.permute(1, 2, 0) * 127.5 + 128).clamp(0, 255).to(torch.uint8).squeeze(0)
@@ -698,31 +903,42 @@ class LucidSonicDream:
                   flash_percussive: bool = None,
                   custom_effects: list = None):
     '''Full pipeline of video generation'''
-    
+
     # Raise exception if speed_fpm > fps*60
     if speed_fpm > fps*60:
-      sys.exit('speed_fpm must not be greater than fps * 60')
-    
+      raise InvalidParameterError('speed_fpm must not be greater than fps * 60')
+
     # Raise exception if element of custom_effects is not EffectsGenerator
     if custom_effects:
       if not all(isinstance(effect, EffectsGenerator) \
                   for effect in custom_effects):
-        sys.exit('Elements of custom_effects must be EffectsGenerator objects')
+        raise InvalidParameterError('Elements of custom_effects must be EffectsGenerator objects')
 
     # Raise exception of classes is an empty list
     if classes:
       if len(classes) == 0:
-        sys.exit('classes must be NoneType or list with length > 0')
+        raise InvalidParameterError('classes must be NoneType or list with length > 0')
 
-    # Raise exception if any of the following parameters are not betwee 0 and 1
-    for param in ['motion_randomness', 'truncation','class_shuffle_strength', 
+    # Raise exception if any of the following parameters are not between 0 and 1
+    for param in ['motion_randomness', 'truncation','class_shuffle_strength',
                   'contrast_strength', 'flash_strength']:
 
         if (locals()[param]) and not (0 <= locals()[param] <= 1):
-          sys.exit('{} must be between 0 and 1'.format(param))
+          raise InvalidParameterError(f'{param} must be between 0 and 1')
 
-    self.file_name = file_name if file_name[-4:] == '.mp4' \
-                     else file_name + '.mp4'
+    # Warn about memory usage on Colab
+    if resolution and is_colab():
+        estimated_mem = estimate_memory_usage_mb(resolution, batch_size)
+        available_mem = get_gpu_memory_mb()
+        if available_mem > 0 and estimated_mem > available_mem * 0.8:
+            suggested = suggest_batch_size(resolution, available_mem)
+            print(f"Warning: Estimated memory usage ({estimated_mem:.0f}MB) may exceed "
+                  f"available GPU memory ({available_mem:.0f}MB). "
+                  f"Consider using batch_size={suggested}")
+
+    # Use pathlib for robust file name handling
+    file_path = Path(file_name)
+    self.file_name = str(file_path.with_suffix('.mp4'))
     self.resolution = resolution
     self.batch_size = batch_size
     self.frame_batch_size = frame_batch_size
@@ -802,55 +1018,47 @@ class LucidSonicDream:
     else:
         wav_output, sr_output = self.wav, self.sr
 
+    # Use temp directory for temporary files (Colab-compatible)
+    temp_dir = get_temp_dir()
+    temp_video_path = os.path.join(temp_dir, 'lsd_tmp.mp4')
+    temp_audio_path = os.path.join(temp_dir, 'lsd_tmp.wav')
+
     # Write temporary movie file
     print('\nGenerating movie...\n')
-    if np.any(all_frames): # If frames not passed back, then they're in folder
-        imageio.mimwrite('tmp.mp4', all_frames, quality=8, fps=self.sr/self.frame_duration)
-        video = mpy.VideoFileClip('tmp.mp4')
+    if np.any(all_frames):  # If frames not passed back, then they're in folder
+        imageio.mimwrite(temp_video_path, all_frames, quality=8, fps=self.sr/self.frame_duration)
+        video = mpy.VideoFileClip(temp_video_path)
     else:
         video = mpy.ImageSequenceClip(self.frames_dir, fps=self.sr/self.frame_duration)
 
     # Write temporary audio file - fixing the soundfile write
-    temp_audio_path = 'tmp.wav'
     try:
         # Ensure audio data is normalized float32 between -1 and 1
         wav_output = np.array(wav_output, dtype=np.float32)
         if wav_output.max() > 1.0 or wav_output.min() < -1.0:
             wav_output = wav_output / max(abs(wav_output.max()), abs(wav_output.min()))
-        
+
         soundfile.write(temp_audio_path, wav_output, sr_output, format='WAV')
     except Exception as e:
         print(f"Error writing audio file: {e}")
         raise
 
-    # Mix audio & video
+    # Mix audio & video with codec fallback for Colab compatibility
     try:
         audio = mpy.AudioFileClip(temp_audio_path, fps=self.sr*2)
         video = video.set_audio(audio)
-        video.write_videofile(file_name, audio_codec='aac', audio_bitrate="1024k")
+        write_video_with_codec_fallback(video, self.file_name, audio_bitrate="1024k")
     finally:
         # Clean up temporary files
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
-        if np.any(all_frames) and os.path.exists('tmp.mp4'):
-            os.remove('tmp.mp4')
-        if not save_frames and not np.any(all_frames) and os.path.exists(self.frames_dir): 
+        if np.any(all_frames) and os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
+        if not save_frames and not np.any(all_frames) and os.path.exists(self.frames_dir):
             shutil.rmtree(self.frames_dir)
         del all_frames
-    
-    video = video.set_audio(audio)
-    video.write_videofile(file_name, audio_codec='aac', audio_bitrate="1024k")
 
-    # Delete temporary audio file
-    os.remove('tmp.wav')
-    if np.any(all_frames):
-      os.remove('tmp.mp4')
-
-    # By default, delete temporary frames directory
-    if not save_frames and not np.any(all_frames): 
-      shutil.rmtree(self.frames_dir)
-
-    del all_frames
+    print(f'\nVideo saved to: {self.file_name}\n')
 
 
 class EffectsGenerator:
@@ -864,13 +1072,14 @@ class EffectsGenerator:
     self.strength = strength
     self.percussive = percussive
 
-    # Raise exception of func does not take in parameters array, 
+    # Raise exception if func does not take in parameters array,
     # strength, and amplitude
     func_sig = list(inspect.getfullargspec(func))[0]
     for arg in ['array', 'strength', 'amplitude']:
       if arg not in func_sig:
-        sys.exit('func must be a function with parameters '\
-                 'array, strength, and amplitude')
+        raise InvalidParameterError(
+            'func must be a function with parameters array, strength, and amplitude'
+        )
     
 
   def render_audio(self, start, duration, n_mels, hop_length):

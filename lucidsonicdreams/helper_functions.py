@@ -1,26 +1,25 @@
+import csv
+import io
 import numpy as np
-import random
-import pickle 
+import pickle
 import requests
 import json
-import pandas as pd
 
 import librosa
 import pygit2
-import gdown 
+import gdown
 from mega import Mega
 
 
 def download_weights(url, output):
   '''Download model weights from URL'''
 
-  if 'drive.google.com' in url: 
-    gdown.download(url, output = output, quiet = False)
+  if 'drive.google.com' in url:
+    gdown.download(url, output=output, quiet=False)
 
   elif 'mega.nz' in url:
     m = Mega()
-    m.login().download_url(url, 
-                           dest_filename = output)
+    m.login().download_url(url, dest_filename=output)
 
   elif 'yadi.sk' in url:
     endpoint = 'https://cloud-api.yandex.net/v1/disk/'\
@@ -30,15 +29,24 @@ def download_weights(url, output):
     r = requests.get(r_pre_href)
     with open(output, 'wb') as f:
       f.write(r.content)
-      
+
   else:
     r = requests.get(url)
     with open(output, 'wb') as f:
       f.write(r.content)
 
 
+# Cache for model list to avoid repeated network requests
+_models_cache = None
+
+
 def consolidate_models():
   '''Consolidate JSON dictionaries of pre-trained StyleGAN(2) weights'''
+  global _models_cache
+
+  # Return cached result if available
+  if _models_cache is not None:
+    return _models_cache
 
   # Define URL's for pre-trained StyleGAN and StyleGAN2 weights
   stylegan_url = 'https://raw.githubusercontent.com/justinpinkney/'\
@@ -46,9 +54,10 @@ def consolidate_models():
   stylegan2_url = 'https://raw.githubusercontent.com/justinpinkney/'\
   'awesome-pretrained-stylegan2/master/models.json'
 
-  # Load JSON dictionary of StyleGAN weights
-  models_stylegan = pd.read_csv(stylegan_url)\
-                    .to_dict(orient='records')
+  # Load CSV without pandas - use stdlib csv module (faster import, same result)
+  r_csv = requests.get(stylegan_url)
+  csv_reader = csv.DictReader(io.StringIO(r_csv.text))
+  models_stylegan = list(csv_reader)
 
   # Load JSON dictionary of StyleGAN2 weights
   r = requests.get(stylegan2_url)
@@ -56,6 +65,9 @@ def consolidate_models():
 
   # Consolidate StyleGAN and StyleGAN2 weights
   all_models = models_stylegan + models_stylegan2
+
+  # Cache the result
+  _models_cache = all_models
 
   return all_models
 
@@ -79,31 +91,41 @@ def get_spec_norm(wav, sr, n_mels, hop_length):
 
 
 def interpolate(array_1: np.ndarray, array_2: np.ndarray, steps: int):
-  '''Linear interpolation between 2 arrays'''
-
-  # Obtain evenly-spaced ratios between 0 and 1
-  linspace = np.linspace(0, 1, steps)
-
-  # Generate arrays for interpolation using ratios
-  arrays = [(1-l)*array_1 + (l)*array_2 for l in linspace]
-
-  return np.asarray(arrays)
+  '''Linear interpolation between 2 arrays - vectorized version'''
+  # Vectorized: compute all interpolations at once using broadcasting
+  # Shape: (steps, 1) * (array_shape,) -> (steps, array_shape)
+  t = np.linspace(0, 1, steps)[:, np.newaxis]
+  return (1 - t) * array_1 + t * array_2
 
 
 def full_frame_interpolation(frame_init, steps, len_output):
   '''Given a list of arrays (frame_init), produce linear interpolations between
-     each pair of arrays. '''
+     each pair of arrays. Optimized with pre-allocation.'''
 
-  # Generate list of lists, where each inner list is a linear interpolation
-  # sequence between two arrays.
-  frames = [interpolate(frame_init[i], frame_init[i+1], steps) \
-            for i in range(len(frame_init)-1)]
+  frame_init = np.asarray(frame_init)
+  n_segments = len(frame_init) - 1
 
-  # Flatten list of lists
-  frames = [vec for interp in frames for vec in interp]
+  if n_segments <= 0:
+    # Single frame, just tile it
+    return [frame_init[0]] * len_output
 
-  # Repeat final vector until output is of the desired length
-  while len(frames) < len_output:
-    frames.append(frames[-1])
+  # Pre-allocate output array
+  total_frames = n_segments * steps
+  frame_shape = frame_init[0].shape
+  frames_array = np.empty((total_frames,) + frame_shape, dtype=frame_init.dtype)
 
-  return frames
+  # Vectorized interpolation for each segment
+  t = np.linspace(0, 1, steps)[:, np.newaxis]
+  for i in range(n_segments):
+    start_idx = i * steps
+    end_idx = start_idx + steps
+    frames_array[start_idx:end_idx] = (1 - t) * frame_init[i] + t * frame_init[i + 1]
+
+  # Convert to list and pad if needed
+  frames = list(frames_array)
+
+  # Pad with final frame if needed (using list extend is faster than while loop)
+  if len(frames) < len_output:
+    frames.extend([frames[-1]] * (len_output - len(frames)))
+
+  return frames[:len_output]
