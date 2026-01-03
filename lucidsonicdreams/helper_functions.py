@@ -11,6 +11,62 @@ import gdown
 from mega import Mega
 
 
+# =============================================================================
+# R3GAN Model Registry
+# =============================================================================
+# R3GAN: A Modern GAN Baseline (NeurIPS 2024)
+# Paper: https://arxiv.org/abs/2501.05441
+# Code: https://github.com/brownvc/R3GAN
+
+R3GAN_MODELS = {
+    'r3gan_ffhq_256': {
+        'name': 'r3gan_ffhq_256',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-FFHQ-256x256/resolve/main/ffhq-256x256.pkl',
+        'resolution': 256,
+        'num_classes': 0,
+        'type': 'r3gan',
+        'description': 'R3GAN FFHQ 256x256 - High quality faces (FID: 2.75)',
+    },
+    'r3gan_ffhq_64': {
+        'name': 'r3gan_ffhq_64',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-FFHQ-64x64/resolve/main/ffhq-64x64.pkl',
+        'resolution': 64,
+        'num_classes': 0,
+        'type': 'r3gan',
+        'description': 'R3GAN FFHQ 64x64 - Fast face generation (FID: 1.95)',
+    },
+    'r3gan_cifar10': {
+        'name': 'r3gan_cifar10',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-CIFAR10/resolve/main/cifar10.pkl',
+        'resolution': 32,
+        'num_classes': 10,
+        'type': 'r3gan',
+        'description': 'R3GAN CIFAR-10 - 10-class conditional (FID: 1.96)',
+    },
+    'r3gan_imagenet_64': {
+        'name': 'r3gan_imagenet_64',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-ImgNet-64x64/resolve/main/imagenet-64x64.pkl',
+        'resolution': 64,
+        'num_classes': 1000,
+        'type': 'r3gan',
+        'description': 'R3GAN ImageNet 64x64 - 1000-class conditional (FID: 2.09)',
+    },
+    'r3gan_imagenet_32': {
+        'name': 'r3gan_imagenet_32',
+        'download_url': 'https://huggingface.co/brownvc/R3GAN-ImgNet-32x32/resolve/main/imagenet-32x32.pkl',
+        'resolution': 32,
+        'num_classes': 1000,
+        'type': 'r3gan',
+        'description': 'R3GAN ImageNet 32x32 - 1000-class conditional (FID: 1.27)',
+    },
+}
+
+
+def get_r3gan_models():
+    """Get list of available R3GAN models in the same format as consolidate_models()"""
+    return list(R3GAN_MODELS.values())
+
+
 def download_weights(url, output):
   '''Download model weights from URL'''
 
@@ -41,7 +97,7 @@ _models_cache = None
 
 
 def consolidate_models():
-  '''Consolidate JSON dictionaries of pre-trained StyleGAN(2) weights'''
+  '''Consolidate JSON dictionaries of pre-trained StyleGAN(2) and R3GAN weights'''
   global _models_cache
 
   # Return cached result if available
@@ -63,13 +119,23 @@ def consolidate_models():
   r = requests.get(stylegan2_url)
   models_stylegan2 = json.loads(r.text)
 
-  # Consolidate StyleGAN and StyleGAN2 weights
-  all_models = models_stylegan + models_stylegan2
+  # Get R3GAN models
+  models_r3gan = get_r3gan_models()
+
+  # Consolidate StyleGAN, StyleGAN2, and R3GAN weights
+  all_models = models_stylegan + models_stylegan2 + models_r3gan
 
   # Cache the result
   _models_cache = all_models
 
   return all_models
+
+
+def is_r3gan_style(style):
+  """Check if a style name refers to an R3GAN model"""
+  if isinstance(style, str):
+    return style.lower() in R3GAN_MODELS or style.lower().startswith('r3gan')
+  return False
 
 
 def get_spec_norm(wav, sr, n_mels, hop_length):

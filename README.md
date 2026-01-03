@@ -1,11 +1,10 @@
 # Lucid Sonic Dreams
 Lucid Sonic Dreams syncs GAN-generated visuals to music!
 
-By default, it uses [NVLabs StyleGAN2-ada-pytorch](https://github.com/NVlabs/stylegan2-ada-pytorch).
-It can also use pre-trained models lifted from [Justin Pinkney's consolidated repository](https://github.com/justinpinkney/awesome-pretrained-stylegan2), but
-these are untested.
-
-"save_frames" is no longer used as this version works in RAM and doesn't save frames to disk.
+Supports multiple GAN architectures:
+- **R3GAN** (NEW!) - Modern GAN baseline with state-of-the-art FID scores ([Paper](https://arxiv.org/abs/2501.05441))
+- **StyleGAN3** - NVIDIA's alias-free GAN ([Repo](https://github.com/NVlabs/stylegan3))
+- **StyleGAN2** - Pre-trained models from [Justin Pinkney's repository](https://github.com/justinpinkney/awesome-pretrained-stylegan2)
 
 Sample output can be found on [YouTube](https://www.youtube.com/watch?v=SDf7a28cSVs).
 
@@ -46,14 +45,42 @@ Refer to the [Lucid Sonic Dreams Tutorial Notebook](https://colab.research.googl
 
 ### Basic Visualization
 
-```
+```python
 from lucidsonicdreams import LucidSonicDream
-
 
 L = LucidSonicDream(song = 'song.mp3',
                     style = 'abstract photos')
 
-L.hallucinate(file_name = 'song.mp4') 
+L.hallucinate(file_name = 'song.mp4')
 ```
+
+### R3GAN Models (Recommended)
+
+R3GAN achieves better visual quality (lower FID) than StyleGAN2 with a simpler architecture:
+
+```python
+from lucidsonicdreams import LucidSonicDream, show_r3gan_styles
+
+# See available R3GAN models
+show_r3gan_styles()
+
+# Use R3GAN for face generation (FID: 2.75 vs StyleGAN2's 3.78)
+L = LucidSonicDream(song='song.mp3', style='r3gan_ffhq_256')
+L.hallucinate(file_name='faces.mp4')
+
+# Use R3GAN for class-conditional generation (1000 ImageNet classes)
+L = LucidSonicDream(song='song.mp3', style='r3gan_imagenet_64')
+L.hallucinate(file_name='objects.mp4')
+```
+
+**Available R3GAN Models:**
+| Model | Resolution | Classes | FID | Description |
+|-------|------------|---------|-----|-------------|
+| `r3gan_ffhq_256` | 256x256 | 0 | 2.75 | High-quality faces |
+| `r3gan_ffhq_64` | 64x64 | 0 | 1.95 | Fast face generation |
+| `r3gan_cifar10` | 32x32 | 10 | 1.96 | 10-class conditional |
+| `r3gan_imagenet_64` | 64x64 | 1000 | 2.09 | 1000-class conditional |
+| `r3gan_imagenet_32` | 32x32 | 1000 | 1.27 | 1000-class conditional |
+
 sg2-ada-pt-song-spleeter.py is an example with a variety of configuration options as defaults, based on the audio being split into 4 stems using spleeter - https://github.com/deezer/spleeter
 
