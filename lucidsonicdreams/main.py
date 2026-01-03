@@ -905,7 +905,7 @@ class LucidSonicDream:
     num_frame_batches = int(len(self.noise) / batch_size)
     max_frame_index = num_frame_batches * batch_size + batch_size
 
-    on_disk = frame_batch_size is None or max_frame_index > frame_batch_size
+    on_disk = frame_batch_size is not None and max_frame_index > frame_batch_size
 
     if self.use_tf:
         Gs_syn_kwargs = {'output_transform': {'func': self.convert_images_to_uint8, 
