@@ -516,7 +516,12 @@ class LucidSonicDream:
       except Exception:
         self.num_possible_classes = 0
     except Exception:
-      self.num_possible_classes = 0      
+      self.num_possible_classes = 0
+
+    # Auto-assign input_shape from model's z_dim if available
+    if hasattr(self.Gs, 'z_dim'):
+      self.input_shape = self.Gs.z_dim
+      print(f"Set input_shape to {self.input_shape} from model z_dim")
 
 
   def load_specs(self):
@@ -978,22 +983,33 @@ class LucidSonicDream:
 
                 # Use inference_mode for best performance (faster than no_grad)
                 with torch.inference_mode():
-                    # R3GAN and StyleGAN both support mapping + synthesis interface
-                    # R3GAN also supports direct G(z, c) call, but mapping+synthesis
-                    # gives us access to W-space for smoother interpolation
-                    try:
-                        w_batch = self.Gs.mapping(noise_tensor, class_batch)
-                        image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs)
-                    except (AttributeError, TypeError):
-                        # Fallback to direct call if mapping/synthesis not available
-                        # This handles some R3GAN model variations
-                        class_tensor = torch.from_numpy(class_batch).to(device)
-                        if self.use_fp16:
-                            if self.use_r3gan and hasattr(torch, 'bfloat16'):
-                                class_tensor = class_tensor.to(torch.bfloat16)
-                            else:
-                                class_tensor = class_tensor.half()
+                    if self.use_r3gan:
+                        # R3GAN uses direct G(z, c) interface
+                        # Convert class_batch to one-hot encoding for conditional models
+                        if self.num_possible_classes > 0:
+                            # Get class indices from the continuous class vectors
+                            class_indices = np.argmax(class_batch, axis=1)
+                            class_tensor = torch.zeros(len(class_indices), self.num_possible_classes, device=device)
+                            class_tensor[torch.arange(len(class_indices)), class_indices] = 1
+                        else:
+                            # Unconditional model - empty class tensor
+                            class_tensor = torch.zeros(noise_tensor.shape[0], 0, device=device)
+
+                        if self.use_fp16 and hasattr(torch, 'bfloat16'):
+                            class_tensor = class_tensor.to(torch.bfloat16)
+
                         image_batch = self.Gs(noise_tensor, class_tensor)
+                    else:
+                        # StyleGAN uses mapping + synthesis interface
+                        try:
+                            w_batch = self.Gs.mapping(noise_tensor, class_batch)
+                            image_batch = self.Gs.synthesis(w_batch, **Gs_syn_kwargs)
+                        except (AttributeError, TypeError):
+                            # Fallback to direct call
+                            class_tensor = torch.from_numpy(class_batch).to(device)
+                            if self.use_fp16:
+                                class_tensor = class_tensor.half()
+                            image_batch = self.Gs(noise_tensor, class_tensor)
 
                 # Move to CPU for post-processing
                 image_batch = image_batch.detach().cpu().float()
