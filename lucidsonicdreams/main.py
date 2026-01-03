@@ -728,7 +728,7 @@ class LucidSonicDream:
 
     # Get number of noise vectors to initialise (based on speed_fpm)
     num_init_noise = round(
-      librosa.get_duration(path=self.wav, sr=self.sr)/60*self.speed_fpm)
+      librosa.get_duration(y=self.wav, sr=self.sr)/60*self.speed_fpm)
 
     num_frames = len(self.spec_norm_class)
 
