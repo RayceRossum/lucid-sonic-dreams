@@ -16,9 +16,15 @@ from PIL import Image, ImageEnhance
 import skimage.exposure
 import librosa
 import soundfile
-# MoviePy 2.x compatible imports
-from moviepy import VideoFileClip, ImageSequenceClip, AudioFileClip
-from moviepy.audio.AudioClip import AudioArrayClip
+# MoviePy version-compatible imports (supports both 1.x and 2.x)
+try:
+    # MoviePy 2.x
+    from moviepy import VideoFileClip, ImageSequenceClip, AudioFileClip
+    from moviepy.audio.AudioClip import AudioArrayClip
+except ImportError:
+    # MoviePy 1.x
+    from moviepy.editor import VideoFileClip, ImageSequenceClip, AudioFileClip
+    from moviepy.editor import AudioArrayClip
 import pygit2
 from importlib import import_module
 
