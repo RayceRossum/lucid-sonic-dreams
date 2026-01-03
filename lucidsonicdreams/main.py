@@ -24,7 +24,7 @@ try:
 except ImportError:
     # MoviePy 1.x
     from moviepy.editor import VideoFileClip, ImageSequenceClip, AudioFileClip
-    from moviepy.editor import AudioArrayClip
+    from moviepy.audio.AudioClip import AudioArrayClip
 import pygit2
 from importlib import import_module
 
