@@ -8,7 +8,13 @@ import json
 import librosa
 import pygit2
 import gdown
-from mega import Mega
+
+# mega.py is optional due to dependency conflicts with Python 3.12+
+try:
+    from mega import Mega
+    MEGA_AVAILABLE = True
+except ImportError:
+    MEGA_AVAILABLE = False
 
 
 # =============================================================================
@@ -74,6 +80,11 @@ def download_weights(url, output):
     gdown.download(url, output=output, quiet=False)
 
   elif 'mega.nz' in url:
+    if not MEGA_AVAILABLE:
+      raise ImportError(
+        "mega.py is required for downloading from mega.nz but is not installed. "
+        "Install it with: pip install mega.py (note: requires Python < 3.12 due to dependency conflicts)"
+      )
     m = Mega()
     m.login().download_url(url, dest_filename=output)
 
